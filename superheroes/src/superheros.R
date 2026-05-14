@@ -8,6 +8,7 @@ library(randomForest)
 library(caret)
 library(ggrepel)
 library(slider)
+library(factoextra)
 setwd("Documents/programming/tmdb_proj_0526")
 rm(list = ls())
 
@@ -168,7 +169,7 @@ superhero_rf <- superhero_df %>%
     ),season = as.factor(season)) %>%
   dplyr::select(title, profit, budget, runtime, popularity, 
          is_franchise, original_language, 
-         director_power_score, star_power_score, release_month, season) %>%
+         director_power_score, star_power_score, season) %>%
   drop_na()
 
 trainIndex <- sample(1:nrow(superhero_rf), 0.8 * nrow(superhero_rf))
@@ -219,17 +220,11 @@ mds_coords <- cmdscale(1 - rf_prox, k = 2)
 outlier_map <- trainData %>%
   mutate(Dim1 = mds_coords[,1], 
          Dim2 = mds_coords[,2])
-misplaced_movies <- outlier_map %>%
-  filter(
-    (profit_level == "High" & Dim1 > 0.2) |
-      (profit_level == "Low" & Dim1 < -0.3)
-  )
-print(misplaced_movies %>% select(title, profit_level, budget, popularity, Dim1))
 
 plot_data <- outlier_map %>%
   mutate(
     is_anomaly = if_else(
-      (profit_level == "High" & Dim1 > 0.2) | 
+      (profit_level == "High" & Dim1 > 0.1) | 
       (profit_level == "Low" & Dim1 < -0.3),
       as.character(title), 
       NA_character_
@@ -253,26 +248,186 @@ ggplot(plot_data, aes(x = Dim1, y = Dim2, color = profit_level)) +
   scale_color_manual(values = c("High" = "red", "Low" = "blue")) +
   theme_minimal() +
   labs(title = "MDS Plot: Superhero Profit Outliers",
-       subtitle = "Labeled points represent 'misplaced' movies (High-profit stats with Low-profit results, and vice versa)",
        x = "Dimension 1", y = "Dimension 2", 
        color = "Profit Level")
 
+#Random forest model for predicting rating
+set.seed(42)
+
+rating_rf <- superhero_df %>%
+  mutate(
+    is_franchise = if_else(str_detect(title, "[:0-9]| (II|III|IV|V|VI|VII|VIII|IX|X)($| )"), 1, 0),
+    is_franchise = as.factor(is_franchise),
+    original_language = as.factor(original_language),
+    release_date = as.Date(release_date), 
+    release_month = as.factor(month(release_date, label = TRUE)),
+    season = case_when(
+      release_month %in% c("May", "Jun", "Jul") ~ "Summer",
+      release_month %in% c("Nov", "Dec")      ~ "Winter",
+      release_month %in% c("Mar", "Apr")      ~ "Spring",
+      TRUE                                    ~ "Off_Peak"
+    ),season = as.factor(season)) %>%
+  select(title, runtime, popularity, 
+                is_franchise, original_language, 
+                director_power_score, star_power_score, season,
+                combinedRating, numVotes) %>%
+  drop_na()
+
+trainIndex <- sample(1:nrow(rating_rf), 0.8 * nrow(rating_rf))
+trainData <- rating_rf[trainIndex, ]
+testData <- rating_rf[-trainIndex, ]
+rating_rf_model <- randomForest(combinedRating ~ . - title, data = trainData)
+print(rating_rf_model)
+
+predictions <- predict(rating_rf_model, testData)
+error <- predictions - testData$combinedRating
+
+rmse <- sqrt(mean(error^2))
+print(paste("Average error: ", rmse))
+
+ggplot(data.frame(actual = testData$combinedRating, predicted = predictions), aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Actual Rating vs. Predicted Rating",
+       x = "Actual Rating", y = "Predicted Rating") +
+  theme_minimal()
+
+importance(rating_rf_model)
+varImpPlot(rating_rf_model)
+
+rating_rf_classified <- rating_rf %>%
+  mutate(rating_level = as.factor(if_else(combinedRating > median(combinedRating), "High", "Low"))) %>%
+  select(-combinedRating)
+trainIndex <- sample(1:nrow(rating_rf_classified), 0.8 * nrow(rating_rf_classified))
+trainData <- rating_rf_classified[trainIndex, ]
+testData <- rating_rf_classified[-trainIndex, ]
+rating_classified_model <- randomForest(rating_level ~ . - title, data = trainData, proximity = TRUE)
+print(rating_classified_model)
+
+predictions <- predict(rating_classified_model, testData)
+confusionMatrix(predictions, testData$rating_level)
+
+importance(rating_classified_model)
+varImpPlot(rating_classified_model)
+
+MDSplot(rating_classified_model, trainData$rating_level)
+legend("topleft", 
+       legend = levels(trainData$rating_level), 
+       fill = c("red", "blue"))
+
+rf_prox <- randomForest(rating_level ~ ., data = trainData, proximity = TRUE)$proximity
+mds_coords <- cmdscale(1 - rf_prox, k = 2)
+coords_map <- trainData %>%
+  mutate(Dim1 = mds_coords[,1], 
+         Dim2 = mds_coords[,2])
+
+ggplot(coords_map, aes(x = Dim1, y = Dim2, color = rating_level)) +
+  geom_point(alpha = 0.6, size = 2) +
+  scale_color_manual(values = c("High" = "red", "Low" = "blue")) +
+  theme_minimal() +
+  labs(title = "MDS Plot: Superhero Ratings",
+       x = "Dimension 1", y = "Dimension 2", 
+       color = "Rating Category")
+
+features <- rating_rf %>%
+  select(where(is.numeric)) %>%
+  drop_na() %>%
+  mutate(across(everything(), ~ scale(.x) %>% as.vector))
+
+wss <- sapply(1:10, function(k) {
+  kmeans(features, centers = k, nstart = 10)$tot.withinss
+})
+
+fviz_nbclust(features, kmeans, method='silhouette')
+
+k <- 2 
+kmeans_model <- kmeans(features, centers = k, nstart = 10)
+
+rating_rf_clusters <- rating_rf %>%
+  mutate(
+    cluster = as.factor(kmeans_model$cluster),
+    rating_class = if_else(cluster == 1, "Low", "High")  
+  )
+
+ggplot(rating_rf_clusters, aes(x = rating_class, y = combinedRating, fill = rating_class)) +
+  geom_boxplot() +
+  geom_jitter() +
+  labs(title = "Combined Rating by Cluster", x = "Rating Class", y = "Combined Rating") +
+  theme_minimal()
+
+trainIndex <- sample(1:nrow(rating_rf_clusters), 0.8 * nrow(rating_rf_clusters))
+trainData <- rating_rf_clusters[trainIndex, ]
+testData <- rating_rf_clusters[-trainIndex, ]
+
+trainData$rating_class <- as.factor(trainData$rating_class)
+testData$rating_class <- as.factor(testData$rating_class)
+
+rating_cluster_model <- randomForest(
+  rating_class ~ . - title - combinedRating - cluster, 
+  data = trainData,
+  proximity = TRUE
+)
+
+print(rating_cluster_model)
+predictions <- predict(rating_cluster_model, testData)
+confusionMatrix(predictions, testData$rating_class)
+varImpPlot(rating_cluster_model)
+
+rf_prox <- randomForest(
+  rating_class ~ . - title - combinedRating - cluster,
+  data = trainData,
+  proximity = TRUE
+)$proximity
+
+mds_coords <- cmdscale(1 - rf_prox, k = 2)
+
+coords_map <- trainData %>%
+  mutate(Dim1 = mds_coords[,1], Dim2 = mds_coords[,2])
+
+plot_data <- coords_map %>%
+  mutate(
+    is_anomaly = if_else(
+      (rating_class == "High" & Dim1 > -0.3) | 
+        (rating_class == "Low" & Dim1 < -0.45),
+      as.character(title), 
+      NA_character_
+    )
+  )
+
+ggplot(plot_data, aes(x = Dim1, y = Dim2, color = rating_class)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_label_repel(
+    aes(label = is_anomaly),
+    color = "black",
+    fill = "white",          
+    fontface = "bold",
+    size = 3,
+    force = 10,             
+    nudge_y = 0.05,          
+    segment.color = "black",
+    segment.size = 0.5,     
+    segment.alpha = 0.8,    
+    min.segment.length = 0   
+  ) +
+  scale_color_manual(values = c("High" = "red", "Low" = "blue")) +
+  theme_minimal() +
+  labs(title = "MDS Plot: Rating Classes from Clustering", x = "Dimension 1", y = "Dimension 2",
+       color = "Rating Class")
+
 #Linear models 
-profit_model <- superhero_df %>%
-  filter(profit != 0,
-         budget != 0)
-model1 <- glm(profit ~ combinedRating + runtime + budget + popularity + star_power_score + director_power_score, data = profit_model)
+model1 <- glm(profit ~ runtime + budget + popularity + star_power_score + 
+                director_power_score + season + 
+                original_language + is_franchise, data = superhero_rf)
 summary(model1)
 
-profit_long <- profit_model %>%
-  select(profit, combinedRating, budget, star_power_score) %>%
+profit_long <- superhero_rf %>%
+  select(profit, budget, star_power_score) %>%
   pivot_longer(
-    cols = c(combinedRating, budget, star_power_score),
+    cols = c(budget, star_power_score),
     names_to = "Metric",
     values_to = "Value"
   ) %>%
   mutate(Metric = case_when(
-    Metric == "combinedRating" ~ "Combined Average Rating",
     Metric == "star_power_score" ~ "Star Average Career Profit",
     Metric == "budget" ~ "Budget ($)"
   ))
@@ -283,46 +438,60 @@ ggplot(profit_long, aes(x = Value, y = profit)) +
   theme_bw() +
   labs(x = NULL, y = "Profit ($)")
 
-model2 <- glm(combinedRating ~ runtime + budget + star_power_score + director_power_score + popularity +decade, data = superhero_df)
+rating_rf$original_language <- relevel(as.factor(rating_rf$original_language), ref = "en")
+
+model2 <- glm(combinedRating ~ runtime + star_power_score + director_power_score + popularity
+              + season + is_franchise + original_language + numVotes, data = rating_rf)
 summary(model2)
 
-ggplot(superhero_df, aes(x = popularity, y = combinedRating, colour = decade)) +
-  geom_point(alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE) +
-  facet_wrap(~ decade) +
-  theme_bw() +
-  labs(title = "Popularity Effects on Rating in Each Decade",
-       x ="Popularity",
-       y = "Combined Average Rating")
-
-ggplot(superhero_df, aes(x = runtime, y = combinedRating, colour = decade)) +
-  geom_point(alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE) +
-  facet_wrap(~ decade) +
-  theme_bw() +
-  labs(title = "Runtime Effects on Rating in Each Decade",
-       x ="Runtime",
-       y = "Combined Average Rating")
-
-model3 <- glm(budget ~ runtime + star_power_score + director_power_score + popularity, data = profit_model)
-summary(model3)
-
-budget_long <- profit_model %>%
-  select(budget, runtime, star_power_score, director_power_score, popularity) %>%
+rating_long <- rating_rf %>%
+  select(combinedRating, popularity, numVotes) %>%
   pivot_longer(
-    cols = c(runtime, star_power_score, director_power_score, popularity),
+    cols = c(popularity, numVotes),
     names_to = "Metric",
     values_to = "Value"
   ) %>%
   mutate(Metric = case_when(
-    Metric == "runtime" ~ "Runtime (mins)",
-    Metric == "star_power_score" ~ "Star Average Career Profit",
-    Metric == "director_power_score" ~ "Director Average Career Profit",
-    Metric == "popularity" ~ "Popularity"
+    Metric == "popularity" ~ "Popularity",
+    Metric == "numVotes" ~ "Number of Votes (IMDb)"
   ))
-ggplot(budget_long, aes(x = Value, y = budget)) +
+
+ggplot(rating_long, aes(x = Value, y = combinedRating)) +
   geom_point(alpha = 0.7) +
   geom_smooth(method = "lm", se = FALSE) +
   facet_wrap(~Metric, scales = "free_x") +
   theme_bw() +
-  labs(x = NULL, y = "Budget")
+  labs(x = NULL, y = "Average Rating")
+
+ggplot(rating_rf, aes(x = as.factor(is_franchise), y = combinedRating, color = as.factor(is_franchise))) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Franchise vs. Non-Franchise Ratings", x = "Is Franchise (0=No, 1=Yes)",
+       color = "Is Franchise?")
+
+model2_df <- as.data.frame(summary(model2)$coefficients)
+colnames(model2_df) <- c("Estimate", "StdError", "tValue", "PValue")
+
+language_map <- c(
+  "hu" = "Hungarian",
+  "ja" = "Japanese",
+  "ml" = "Malayalam",
+  "ms" = "Malay",
+  "es" = "Spanish",
+  "ur" = "Urdu"
+)
+
+sig_languages <- model2_df[grepl("original_language", rownames(model2_df)) & model2_df$PValue < 0.05, ]
+clean_names <- gsub("original_language", "", rownames(sig_languages))
+rownames(sig_languages) <- ifelse(clean_names %in% names(language_map), 
+                                  language_map[clean_names], 
+                                  clean_names)
+
+sig_languages %>%
+  rownames_to_column("Language") %>%
+  ggplot(aes(x = reorder(Language, Estimate), y = Estimate)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Significant Language Effects on Rating", x = "Language", y = "Coefficient Estimate")
