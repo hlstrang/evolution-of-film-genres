@@ -94,4 +94,6 @@ Four languages were found to be significantly associated with higher average rat
 
 In contrast, Malay and Spanish was found to be significantly associated with a lower average rating, compared to English
 
-![bar plot of languages](plots/rating_language.png)
+This data was filtered to only include languages that had more than 10 films to account for low numbers, e.g. hungarian only had 2 films.
+
+![box plot of languages](plots/rating_language.png)

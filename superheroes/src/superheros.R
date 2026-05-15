@@ -495,3 +495,20 @@ sig_languages %>%
   coord_flip() +
   theme_minimal() +
   labs(title = "Significant Language Effects on Rating", x = "Language", y = "Coefficient Estimate")
+
+lang_df <- rating_rf %>%
+  filter(original_language %in% c("hu", "ja", "ml", "ms", "es", "ur", "en")) %>%
+  group_by(original_language) %>%
+  filter(n() > 10) %>%
+  ungroup() %>%
+  mutate(original_language = recode(original_language,
+                                      "es" = "spanish", 
+                                    "en" = "english",
+                                    "ja" = "japanese"))
+
+ggplot(lang_df, aes(x = original_language, y = combinedRating, colour = original_language)) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(alpha = 0.7, width = 0.3) +
+  labs(title = "Significant Language Effects on Rating", x ="Language",
+       y = "Average Rating", color = "Language") +
+  theme_minimal()
