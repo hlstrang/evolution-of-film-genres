@@ -166,9 +166,10 @@ superhero_rf <- superhero_df %>%
       release_month %in% c("Nov", "Dec")      ~ "Winter",
       release_month %in% c("Mar", "Apr")      ~ "Spring",
       TRUE                                    ~ "Off_Peak"
-    ),season = as.factor(season)) %>%
+    ),season = as.factor(season),
+    numVotes = log10(numVotes)) %>%
   dplyr::select(title, profit, budget, runtime, popularity, 
-         is_franchise, original_language, 
+         is_franchise, original_language, numVotes,
          director_power_score, star_power_score, season) %>%
   drop_na()
 
@@ -211,11 +212,11 @@ importance(superhero_classified_model)
 varImpPlot(superhero_classified_model)
 
 MDSplot(superhero_classified_model, trainData$profit_level)
-legend("topright", 
+legend("topleft", 
        legend = levels(trainData$profit_level), 
        fill = c("red", "blue"))
 
-rf_prox <- randomForest(profit_level ~ ., data = trainData, proximity = TRUE)$proximity
+rf_prox <- randomForest(profit_level ~ . - title, data = trainData, proximity = TRUE)$proximity
 mds_coords <- cmdscale(1 - rf_prox, k = 2)
 outlier_map <- trainData %>%
   mutate(Dim1 = mds_coords[,1], 
@@ -224,8 +225,8 @@ outlier_map <- trainData %>%
 plot_data <- outlier_map %>%
   mutate(
     is_anomaly = if_else(
-      (profit_level == "High" & Dim1 > 0.1) | 
-      (profit_level == "Low" & Dim1 < -0.3),
+      (profit_level == "High" & Dim1 < -0.1) | 
+      (profit_level == "Low" & Dim1 > 0.3),
       as.character(title), 
       NA_character_
     )
@@ -266,7 +267,8 @@ rating_rf <- superhero_df %>%
       release_month %in% c("Nov", "Dec")      ~ "Winter",
       release_month %in% c("Mar", "Apr")      ~ "Spring",
       TRUE                                    ~ "Off_Peak"
-    ),season = as.factor(season)) %>%
+    ),season = as.factor(season),
+    numVotes = log10(numVotes)) %>%
   select(title, runtime, popularity, 
                 is_franchise, original_language, 
                 director_power_score, star_power_score, season,
@@ -315,20 +317,6 @@ legend("topleft",
        legend = levels(trainData$rating_level), 
        fill = c("red", "blue"))
 
-rf_prox <- randomForest(rating_level ~ ., data = trainData, proximity = TRUE)$proximity
-mds_coords <- cmdscale(1 - rf_prox, k = 2)
-coords_map <- trainData %>%
-  mutate(Dim1 = mds_coords[,1], 
-         Dim2 = mds_coords[,2])
-
-ggplot(coords_map, aes(x = Dim1, y = Dim2, color = rating_level)) +
-  geom_point(alpha = 0.6, size = 2) +
-  scale_color_manual(values = c("High" = "red", "Low" = "blue")) +
-  theme_minimal() +
-  labs(title = "MDS Plot: Superhero Ratings",
-       x = "Dimension 1", y = "Dimension 2", 
-       color = "Rating Category")
-
 features <- rating_rf %>%
   select(where(is.numeric)) %>%
   drop_na() %>%
@@ -346,7 +334,7 @@ kmeans_model <- kmeans(features, centers = k, nstart = 10)
 rating_rf_clusters <- rating_rf %>%
   mutate(
     cluster = as.factor(kmeans_model$cluster),
-    rating_class = if_else(cluster == 1, "Low", "High")  
+    rating_class = if_else(cluster == 1, "High", "Low")  
   )
 
 ggplot(rating_rf_clusters, aes(x = rating_class, y = combinedRating, fill = rating_class)) +
@@ -387,8 +375,8 @@ coords_map <- trainData %>%
 plot_data <- coords_map %>%
   mutate(
     is_anomaly = if_else(
-      (rating_class == "High" & Dim1 > -0.3) | 
-        (rating_class == "Low" & Dim1 < -0.45),
+      (rating_class == "High" & Dim1 < 0.2) | 
+        (rating_class == "Low" & Dim1 > 0.6),
       as.character(title), 
       NA_character_
     )
@@ -416,20 +404,21 @@ ggplot(plot_data, aes(x = Dim1, y = Dim2, color = rating_class)) +
 
 #Linear models 
 model1 <- glm(profit ~ runtime + budget + popularity + star_power_score + 
-                director_power_score + season + 
+                director_power_score + season + numVotes +
                 original_language + is_franchise, data = superhero_rf)
 summary(model1)
 
 profit_long <- superhero_rf %>%
-  select(profit, budget, star_power_score) %>%
+  select(profit, budget, star_power_score, numVotes) %>%
   pivot_longer(
-    cols = c(budget, star_power_score),
+    cols = c(budget, star_power_score, numVotes),
     names_to = "Metric",
     values_to = "Value"
   ) %>%
   mutate(Metric = case_when(
     Metric == "star_power_score" ~ "Star Average Career Profit",
-    Metric == "budget" ~ "Budget ($)"
+    Metric == "budget" ~ "Budget ($)",
+    Metric == "numVotes" ~ "Number of IMDb Votes (log10)"
   ))
 ggplot(profit_long, aes(x = Value, y = profit)) +
   geom_point(alpha = 0.7) +
@@ -453,7 +442,7 @@ rating_long <- rating_rf %>%
   ) %>%
   mutate(Metric = case_when(
     Metric == "popularity" ~ "Popularity",
-    Metric == "numVotes" ~ "Number of Votes (IMDb)"
+    Metric == "numVotes" ~ "Number of IMDb Votes (Log10)"
   ))
 
 ggplot(rating_long, aes(x = Value, y = combinedRating)) +
@@ -497,12 +486,12 @@ sig_languages %>%
   labs(title = "Significant Language Effects on Rating", x = "Language", y = "Coefficient Estimate")
 
 lang_df <- rating_rf %>%
-  filter(original_language %in% c("hu", "ja", "ml", "ms", "es", "ur", "en")) %>%
+  filter(original_language %in% c("hu", "ja", "ml", "ur", "lb", "fr", "en")) %>%
   group_by(original_language) %>%
   filter(n() > 10) %>%
   ungroup() %>%
   mutate(original_language = recode(original_language,
-                                      "es" = "spanish", 
+                                      "fr" = "french", 
                                     "en" = "english",
                                     "ja" = "japanese"))
 
