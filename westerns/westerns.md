@@ -14,6 +14,7 @@ Columns were then added:
 - star average career profit = first named actor's average film profit of all films prior to current film
 - director career average profit = director's average film profit of all films prior to current film
 - relative popularity = popularity divided by the average popularity for the year of the film's release, this accounts for a film being very popular in e.g. 1960 not being as popular in e.g. 2024
+- inflation was accounted for in profits and budgets by using the library 'quantmod' to extract Consumer Price Index (CPI) data
 
 This dataset contained 5433 films, ranging from 1912 to 2024
 
@@ -36,7 +37,7 @@ Plotting the data across 2 dimensions shows high profit and low profit films to 
 ## Predicting Average Rating
 I also ran a Random Forest model on the combined rating, which I ran on all films, but didn't include financial data in the model most of these films didn't have any. However, the model did not perform well on either the continuous combined rating variable or a rating catorgory of high and low created from the median. I, again, performed K-means clustering to determine the optimal clustering of the data and used these factors for the model.
 
-The optimal number of clusters was 2, however, not split equally. From this, the model had an OOB error of 1.07% on the training data and a confusion matrix accuracy of 98% on the test data. The [Mean Decrease Gini plot](plots/var_imp_rating.png) showed the features popularity and number of votes to be the most predictive of average rating.
+The optimal number of clusters was 2, however, not split equally. From this, the model had an OOB error of 1.04% on the training data and a confusion matrix accuracy of 99% on the test data. The [Mean Decrease Gini plot](plots/var_imp_rating.png) showed the features popularity and number of votes to be the most predictive of average rating.
 
 Plotting the data across 2 dimensions shows high profit and low profit films to be relatively separate. The top features were plotted to show the most influential features, with longer arrows having higher predictive powers.
 
@@ -46,7 +47,7 @@ Plotting the data across 2 dimensions shows high profit and low profit films to 
 To then see whether the top predictive features are significantly affecting the respective variable, generalised linear models were performed.
 
 ### Profit
-From this model, only popularity and star power score were significant. The plots show their relationships. For both variables, as they increase, profits increase.
+From this model, only popularity and budget were significant. The plots show their relationships. For both variables, as they increase, profits increase.
 
 ![scatter plots of profits](plots/profit_scatter.png)
 
@@ -54,13 +55,3 @@ From this model, only popularity and star power score were significant. The plot
 This model revealed multiple variables to be significant. Firstly, popularity, relative popularity, runtime, and the number of votes from IMDb both had a significant positive relationship, as shown by plot below.
 
 ![scatter plot of ratings](plots/rating_scatter.png)
-
-Ten languages were found to be significantly associated with higher average ratings, in comparison to English. This data was filtered to only include languages that had more than 10 films to account for low numbers, which gave five languages that had significantly higher average ratings compared to English. These were:
-
-- Spanish
-- German
-- Dutch
-- Italian
-- Portugese
-
-![box plot of languages](plots/rating_language.png)

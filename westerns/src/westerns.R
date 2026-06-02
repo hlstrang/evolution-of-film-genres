@@ -9,6 +9,7 @@ library(caret)
 library(ggrepel)
 library(slider)
 library(factoextra)
+library(quantmod)
 setwd("Documents/programming/tmdb_proj_0526")
 rm(list = ls())
 
@@ -17,6 +18,20 @@ df <- read_csv("TMDB  IMDB Movies Dataset.csv")
 ##Westerns
 
 #Filtering
+getSymbols("CPIAUCSL", src = "FRED")
+cpi_data <- as.data.frame(CPIAUCSL) %>%
+  rename(cpi = CPIAUCSL) %>%
+  tibble::rownames_to_column("date") %>%  
+  mutate(
+    date = as.Date(date), 
+    year = lubridate::year(date) 
+  ) %>%
+  select(year, cpi)
+
+cpi_data <- cpi_data %>%
+  group_by(year) %>%
+  summarise(cpi = mean(cpi, na.rm = TRUE)) 
+
 all_films <- df %>%
   filter(!is.na(release_date)) %>%
   mutate(year = year(as.Date(release_date))) %>%
@@ -31,12 +46,27 @@ western_df <- all_films %>%
   filter(!is.na(release_date)) %>%
   mutate(year = year(as.Date(release_date)),
          decade = as.factor((year %/% 10) * 10),
-         combinedRating = (averageRating + vote_average)/2,
-         profit = revenue - budget) %>%
+         combinedRating = (averageRating + vote_average)/2) %>%
   mutate(rating_category = cut(combinedRating, 
                                breaks = c(0, 4, 7, 10), 
                                labels = c("Low", "Medium", "High"),
-                               include.lowest = TRUE))
+                               include.lowest = TRUE)) %>%
+  left_join(cpi_data, by = "year")
+
+base_year <- 2024
+base_cpi <- cpi_data %>%
+  filter(year == base_year) %>%
+  pull(cpi) %>%
+  as.numeric()
+
+western_df <- western_df %>%
+  mutate(
+    budget_2024 = if_else(!is.na(budget) & !is.na(cpi),
+                          (budget / cpi) * base_cpi, NA),
+    revenue_2024 = if_else(!is.na(revenue) & !is.na(cpi),
+                           (revenue / cpi) * base_cpi, NA),
+    profit_2024 = revenue_2024 - budget_2024
+  )
 
 western_df <- western_df %>%
   mutate(
@@ -47,10 +77,10 @@ western_df <- western_df %>%
 western_df <- western_df %>%
   group_by(lead_actor) %>%
   mutate(
-    star_power_score = slide_dbl(profit, mean, .before = 5, .after = -1, .complete = FALSE)
+    star_power_score = slide_dbl(profit_2024, mean, .before = 5, .after = -1, .complete = FALSE)
   ) %>%
   ungroup() %>%
-  mutate(star_power_score = if_else(is.na(star_power_score), median(profit, na.rm = TRUE), star_power_score))
+  mutate(star_power_score = if_else(is.na(star_power_score), median(profit_2024, na.rm = TRUE), star_power_score))
 
 western_df <- western_df %>%
   mutate(
@@ -58,10 +88,10 @@ western_df <- western_df %>%
   ) %>%
   group_by(lead_director) %>%
   mutate(
-    director_power_score = slide_dbl(profit, mean, .before = 5, .after = -1, .complete = FALSE)
+    director_power_score = slide_dbl(profit_2024, mean, .before = 5, .after = -1, .complete = FALSE)
   ) %>%
   ungroup() %>%
-  mutate(director_power_score = if_else(is.na(director_power_score), median(profit, na.rm = TRUE), director_power_score))
+  mutate(director_power_score = if_else(is.na(director_power_score), median(profit_2024, na.rm = TRUE), director_power_score))
 
 western_counts_per_year <- western_df %>%
   group_by(year) %>%
@@ -122,16 +152,14 @@ rating_rf <- western_df %>%
       TRUE                                    ~ "Off_Peak"
     ),season = as.factor(season),
     numVotes = log10(numVotes)) %>%
-  select(title, runtime, popularity, original_language, 
-         director_power_score, star_power_score, season,
-         combinedRating, numVotes, relative_popularity, lead_actor,
-         lead_director) %>%
+  select(title, runtime, popularity, original_language, season,
+         combinedRating, numVotes, relative_popularity) %>%
   drop_na()
 
 trainIndex <- sample(1:nrow(rating_rf), 0.8 * nrow(rating_rf))
 trainData <- rating_rf[trainIndex, ]
 testData <- rating_rf[-trainIndex, ]
-rating_rf_model <- randomForest(combinedRating ~ . - title - lead_actor - lead_director, data = trainData)
+rating_rf_model <- randomForest(combinedRating ~ . - title, data = trainData)
 print(rating_rf_model)
 
 predictions <- predict(rating_rf_model, testData)
@@ -156,7 +184,7 @@ rating_rf_classified <- rating_rf %>%
 trainIndex <- sample(1:nrow(rating_rf_classified), 0.8 * nrow(rating_rf_classified))
 trainData <- rating_rf_classified[trainIndex, ]
 testData <- rating_rf_classified[-trainIndex, ]
-rating_classified_model <- randomForest(rating_level ~ . - title - lead_actor - lead_director, data = trainData, proximity = TRUE)
+rating_classified_model <- randomForest(rating_level ~ . - title, data = trainData, proximity = TRUE)
 print(rating_classified_model)
 
 predictions <- predict(rating_classified_model, testData)
@@ -190,8 +218,8 @@ rating_rf_clusters <- rating_rf %>%
   mutate(
     cluster = as.factor(kmeans_model$cluster),
     rating_class = case_when(
-      cluster == 1 ~ "High",
-      cluster == 2 ~ "Low",
+      cluster == 1 ~ "Low",
+      cluster == 2 ~ "High",
       .default = "Unknown" 
     )
   )
@@ -210,7 +238,7 @@ trainData$rating_class <- as.factor(trainData$rating_class)
 testData$rating_class <- as.factor(testData$rating_class)
 
 rating_cluster_model <- randomForest(
-  rating_class ~ . - title - combinedRating - cluster - lead_actor - lead_director, 
+  rating_class ~ . - title - combinedRating - cluster, 
   data = trainData,
   proximity = TRUE
 )
@@ -221,7 +249,7 @@ confusionMatrix(predictions, testData$rating_class)
 varImpPlot(rating_cluster_model)
 
 MDSplot(rating_cluster_model, trainData$rating_class)
-legend("topright", 
+legend("topleft", 
        legend = levels(trainData$rating_class), 
        fill = c("red", "blue"))
 
@@ -281,8 +309,8 @@ ggplot(coords_map, aes(x = Dim1, y = Dim2)) +
 set.seed(42)
 
 profit_rf <- western_df %>%
-  filter(profit != 0,
-         budget != 0) %>%
+  filter(profit_2024 != 0,
+         budget_2024 != 0) %>%
   mutate(
     original_language = as.factor(original_language),
     release_date = as.Date(release_date), 
@@ -294,7 +322,7 @@ profit_rf <- western_df %>%
       TRUE                                    ~ "Off_Peak"
     ),season = as.factor(season),
     numVotes = log10(numVotes)) %>%
-  dplyr::select(title, profit, budget, runtime, popularity, original_language, 
+  dplyr::select(title, profit_2024, budget_2024, runtime, popularity, original_language, 
                 director_power_score, star_power_score, season,
                 numVotes, lead_actor, lead_director, relative_popularity) %>%
   drop_na()
@@ -302,17 +330,17 @@ profit_rf <- western_df %>%
 trainIndex <- sample(1:nrow(profit_rf), 0.8 * nrow(profit_rf))
 trainData <- profit_rf[trainIndex, ]
 testData <- profit_rf[-trainIndex, ]
-profit_rf_model <- randomForest(profit ~ . - title - lead_actor - lead_director,
+profit_rf_model <- randomForest(profit_2024 ~ . - title - lead_actor - lead_director,
                                 data = trainData)
 print(profit_rf_model)
 
 predictions <- predict(profit_rf_model, testData)
-error <- predictions - testData$profit
+error <- predictions - testData$profit_2024
 
 rmse <- sqrt(mean(error^2))
 print(paste("Average error in dollars: ", rmse))
 
-ggplot(data.frame(actual = testData$profit, predicted = predictions), aes(x = actual, y = predicted)) +
+ggplot(data.frame(actual = testData$profit_2024, predicted = predictions), aes(x = actual, y = predicted)) +
   geom_point(alpha = 0.5) +
   geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
   labs(title = "Actual Profit vs. Predicted Profit",
@@ -323,8 +351,8 @@ ggplot(data.frame(actual = testData$profit, predicted = predictions), aes(x = ac
 varImpPlot(profit_rf_model)
 
 profit_rf_classified <- profit_rf %>%
-  mutate(profit_level = as.factor(if_else(profit > median(profit), "High", "Low"))) %>%
-  select(-profit)
+  mutate(profit_level = as.factor(if_else(profit_2024 > median(profit_2024), "High", "Low"))) %>%
+  select(-profit_2024)
 trainIndex <- sample(1:nrow(profit_rf_classified), 0.8 * nrow(profit_rf_classified))
 trainData <- profit_rf_classified[trainIndex, ]
 testData <- profit_rf_classified[-trainIndex, ]
@@ -367,10 +395,10 @@ profit_rf_clusters <- profit_rf %>%
     )
   )
 
-ggplot(profit_rf_clusters, aes(x = profit_class, y = profit, color = profit_class)) +
+ggplot(profit_rf_clusters, aes(x = profit_class, y = profit_2024, color = profit_class)) +
   geom_boxplot() +
   geom_jitter() +
-  labs(title = "Combined Rating by Cluster", x = "Rating Class", y = "Combined Rating") +
+  labs(title = "Profit by Cluster", x = "Profit Class", y = "Combined Profit") +
   theme_minimal()
 
 trainIndex <- sample(1:nrow(profit_rf_clusters), 0.8 * nrow(profit_rf_clusters))
@@ -381,7 +409,7 @@ trainData$profit_class <- as.factor(trainData$profit_class)
 testData$profit_class <- as.factor(testData$profit_class)
 
 profit_cluster_model <- randomForest(
-  profit_class ~ . - title - profit - cluster - lead_actor - lead_director, 
+  profit_class ~ . - title - profit_2024 - cluster - lead_actor - lead_director, 
   data = trainData,
   proximity = TRUE
 )
@@ -397,7 +425,7 @@ legend("topleft",
        fill = c("red", "blue"))
 
 rf_prox <- randomForest(
-  profit_class ~ . - title - profit - cluster
+  profit_class ~ . - title - profit_2024 - cluster
   - lead_actor - lead_director,
   data = trainData,
   proximity = TRUE
@@ -409,7 +437,7 @@ coords_map <- trainData %>%
   mutate(Dim1 = mds_coords[,1], Dim2 = mds_coords[,2])
 
 features <- trainData %>%
-  select(where(is.numeric), - profit, - cluster)
+  select(where(is.numeric), - profit_2024, - cluster)
 
 cor_matrix <- cor(features, mds_coords)
 colnames(cor_matrix) <- c("Dim1", "Dim2")
@@ -443,30 +471,30 @@ ggplot(coords_map, aes(x = Dim1, y = Dim2)) +
 
 #Linear models 
 profit_rf$original_language <- relevel(as.factor(profit_rf$original_language), ref = "en")
-model1 <- glm(profit ~ runtime + budget + popularity + star_power_score + director_power_score
+model1 <- glm(profit_2024 ~ runtime + budget_2024 + popularity + star_power_score + director_power_score
               + numVotes + relative_popularity + original_language, data = profit_rf)
 summary(model1)
 
 profit_long <- profit_rf %>%
-  select(profit, popularity, star_power_score) %>%
+  select(profit_2024, popularity, budget_2024) %>%
   pivot_longer(
-    cols = c(popularity, star_power_score),
+    cols = c(popularity, budget_2024),
     names_to = "Metric",
     values_to = "Value"
   ) %>%
   mutate(Metric = case_when(
-    Metric == "star_power_score" ~ "Star Average Career Profit",
+    Metric == "budget_2024" ~ "Budget Adjusted for Inflation ($)",
     Metric == "popularity" ~ "Popularity"
   ))
-ggplot(profit_long, aes(x = Value, y = profit)) +
+ggplot(profit_long, aes(x = Value, y = profit_2024)) +
   geom_point(alpha = 0.7) +
   geom_smooth(method = "lm", se = FALSE) +
   facet_wrap(~Metric, scales = "free_x") +
   theme_bw() +
-  labs(x = NULL, y = "Profit ($)")
+  labs(x = NULL, y = "Profit Adjusted for Inflation ($)")
 
 rating_rf$original_language <- relevel(as.factor(rating_rf$original_language), ref = "en")
-model2 <- glm(combinedRating ~ runtime + star_power_score + director_power_score + 
+model2 <- glm(combinedRating ~ runtime + 
                 popularity + season + relative_popularity + numVotes + original_language
               , data = rating_rf)
 summary(model2)
@@ -490,42 +518,3 @@ ggplot(rating_long, aes(x = Value, y = combinedRating)) +
   facet_wrap(~Metric, scales = "free_x") +
   theme_bw() +
   labs(x = NULL, y = "Average Rating")
-
-model2_df <- as.data.frame(summary(model2)$coefficients)
-colnames(model2_df) <- c("Estimate", "StdError", "tValue", "PValue")
-
-sig_languages <- model2_df[grepl("original_language", rownames(model2_df)) & model2_df$PValue < 0.05, ]
-clean_names <- gsub("original_language", "", rownames(sig_languages))
-
-sig_languages %>%
-  rownames_to_column("Language") %>%
-  ggplot(aes(x = reorder(Language, Estimate), y = Estimate)) +
-  geom_bar(stat = "identity", fill = "steelblue") +
-  coord_flip() +
-  theme_minimal() +
-  labs(title = "Significant Language Effects on Rating", x = "Language", y = "Coefficient Estimate")
-
-sig_lang_codes <- gsub("original_language", "", 
-                       rownames(model2_df)[grepl("original_language", 
-                                                 rownames(model2_df)) & 
-                                             model2_df$PValue < 0.05])
-target_languages <- c(sig_lang_codes, "en")
-lang_df <- rating_rf %>%
-  filter(original_language %in% target_languages) %>%
-  group_by(original_language) %>%
-  filter(n() > 10) %>%
-  ungroup() %>%
-  mutate(original_language = recode(original_language,
-                                    "de" = "german", 
-                                    "en" = "english",
-                                    "it" = "italian",
-                                    "es" = "spanish",
-                                    "nl" = "dutch",
-                                    "pt" = "portugese"))
-
-ggplot(lang_df, aes(x = original_language, y = combinedRating, colour = original_language)) +
-  geom_boxplot(outliers = FALSE) +
-  geom_jitter(alpha = 0.3, width = 0.3) +
-  labs(title = "Significant Language Effects on Rating", x ="Language",
-       y = "Average Rating", color = "Language") +
-  theme_minimal()

@@ -9,6 +9,7 @@ library(caret)
 library(ggrepel)
 library(slider)
 library(factoextra)
+library(quantmod)
 setwd("Documents/programming/tmdb_proj_0526")
 rm(list = ls())
 
@@ -17,6 +18,20 @@ df <- read_csv("TMDB  IMDB Movies Dataset.csv")
 ##Superheros
 
 #Filtering
+getSymbols("CPIAUCSL", src = "FRED")
+cpi_data <- as.data.frame(CPIAUCSL) %>%
+  rename(cpi = CPIAUCSL) %>%
+  tibble::rownames_to_column("date") %>%  
+  mutate(
+    date = as.Date(date), 
+    year = lubridate::year(date) 
+  ) %>%
+  select(year, cpi)
+
+cpi_data <- cpi_data %>%
+  group_by(year) %>%
+  summarise(cpi = mean(cpi, na.rm = TRUE)) 
+
 all_films <- df %>%
   filter(!is.na(release_date)) %>%
   mutate(year = year(as.Date(release_date))) %>%
@@ -32,15 +47,30 @@ superhero_df <- df %>%
   filter(!is.na(release_date)) %>%
   mutate(year = year(as.Date(release_date)),
          decade = as.factor((year %/% 10) * 10),
-         combinedRating = (averageRating + vote_average)/2,
-         profit = revenue - budget) %>%
+         combinedRating = (averageRating + vote_average)/2) %>%
   filter(runtime != 0 & runtime > 40) %>%
   filter(year >= 1960 & year <= 2023) %>%
   filter(popularity < 2000) %>%
   mutate(rating_category = cut(combinedRating, 
                                breaks = c(0, 4, 7, 10), 
                                labels = c("Low", "Medium", "High"),
-                               include.lowest = TRUE))
+                               include.lowest = TRUE)) %>%
+  left_join(cpi_data, by = "year")
+
+base_year <- 2023
+base_cpi <- cpi_data %>%
+  filter(year == base_year) %>%
+  pull(cpi) %>%
+  as.numeric()
+
+superhero_df <- superhero_df %>%
+  mutate(
+    budget_2023 = if_else(!is.na(budget) & !is.na(cpi),
+                          (budget / cpi) * base_cpi, NA),
+    revenue_2023 = if_else(!is.na(revenue) & !is.na(cpi),
+                           (revenue / cpi) * base_cpi, NA),
+    profit_2023 = revenue_2023 - budget_2023
+  )
 
 superhero_df <- superhero_df %>%
   mutate(
@@ -51,10 +81,10 @@ superhero_df <- superhero_df %>%
 superhero_df <- superhero_df %>%
   group_by(lead_actor) %>%
   mutate(
-    star_power_score = slide_dbl(profit, mean, .before = 5, .after = -1, .complete = FALSE)
+    star_power_score = slide_dbl(profit_2023, mean, .before = 5, .after = -1, .complete = FALSE)
   ) %>%
   ungroup() %>%
-  mutate(star_power_score = if_else(is.na(star_power_score), median(profit, na.rm = TRUE), star_power_score))
+  mutate(star_power_score = if_else(is.na(star_power_score), median(profit_2023, na.rm = TRUE), star_power_score))
 
 superhero_df <- superhero_df %>%
   mutate(
@@ -62,10 +92,10 @@ superhero_df <- superhero_df %>%
   ) %>%
   group_by(lead_director) %>%
   mutate(
-    director_power_score = slide_dbl(profit, mean, .before = 5, .after = -1, .complete = FALSE)
+    director_power_score = slide_dbl(profit_2023, mean, .before = 5, .after = -1, .complete = FALSE)
   ) %>%
   ungroup() %>%
-  mutate(director_power_score = if_else(is.na(director_power_score), median(profit, na.rm = TRUE), director_power_score))
+  mutate(director_power_score = if_else(is.na(director_power_score), median(profit_2023, na.rm = TRUE), director_power_score))
 
 superhero_counts_per_year <- superhero_df %>%
   group_by(year) %>%
@@ -131,10 +161,10 @@ ggplot(superhero_df, aes(x=decade, y= combinedRating))+
   theme_minimal()
 
 profit_per_year <- superhero_df %>%
-  filter(profit != 0) %>%
+  filter(profit_2023 != 0) %>%
   group_by(year) %>%
   summarise(
-    avg_profit = mean(profit, na.rm = TRUE),
+    avg_profit = mean(profit_2023, na.rm = TRUE),
     num_films = n()
   )
 
@@ -153,8 +183,8 @@ ggplot(profit_per_year, aes(x = year, y = avg_profit)) +
 set.seed(42)
 
 superhero_rf <- superhero_df %>%
-  filter(profit != 0,
-         budget != 0) %>%
+  filter(profit_2023 != 0,
+         budget_2023 != 0) %>%
   mutate(
     is_franchise = if_else(str_detect(title, "[:0-9]| (II|III|IV|V|VI|VII|VIII|IX|X)($| )"), 1, 0),
     is_franchise = as.factor(is_franchise),
@@ -168,7 +198,7 @@ superhero_rf <- superhero_df %>%
       TRUE                                    ~ "Off_Peak"
     ),season = as.factor(season),
     numVotes = log10(numVotes)) %>%
-  dplyr::select(title, profit, budget, runtime, popularity, 
+  dplyr::select(title, profit_2023, budget_2023, runtime, popularity, 
          is_franchise, original_language, numVotes,
          director_power_score, star_power_score, season) %>%
   drop_na()
@@ -176,16 +206,16 @@ superhero_rf <- superhero_df %>%
 trainIndex <- sample(1:nrow(superhero_rf), 0.8 * nrow(superhero_rf))
 trainData <- superhero_rf[trainIndex, ]
 testData <- superhero_rf[-trainIndex, ]
-superhero_rf_model <- randomForest(profit ~ . - title, data = trainData)
+superhero_rf_model <- randomForest(profit_2023 ~ . - title, data = trainData)
 print(superhero_rf_model)
 
 predictions <- predict(superhero_rf_model, testData)
-error <- predictions - testData$profit
+error <- predictions - testData$profit_2023
 
 rmse <- sqrt(mean(error^2))
 print(paste("Average error in dollars: ", rmse))
 
-ggplot(data.frame(actual = testData$profit, predicted = predictions), aes(x = actual, y = predicted)) +
+ggplot(data.frame(actual = testData$profit_2023, predicted = predictions), aes(x = actual, y = predicted)) +
   geom_point(alpha = 0.5) +
   geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
   labs(title = "Actual Profit vs. Predicted Profit",
@@ -197,8 +227,8 @@ importance(superhero_rf_model)
 varImpPlot(superhero_rf_model)
 
 superhero_rf_classified <- superhero_rf %>%
-  mutate(profit_level = as.factor(if_else(profit > median(profit), "High", "Low"))) %>%
-  select(-profit)
+  mutate(profit_level = as.factor(if_else(profit_2023 > median(profit_2023), "High", "Low"))) %>%
+  select(-profit_2023)
 trainIndex <- sample(1:nrow(superhero_rf_classified), 0.8 * nrow(superhero_rf_classified))
 trainData <- superhero_rf_classified[trainIndex, ]
 testData <- superhero_rf_classified[-trainIndex, ]
@@ -270,8 +300,7 @@ rating_rf <- superhero_df %>%
     ),season = as.factor(season),
     numVotes = log10(numVotes)) %>%
   select(title, runtime, popularity, 
-                is_franchise, original_language, 
-                director_power_score, star_power_score, season,
+                is_franchise, original_language, season,
                 combinedRating, numVotes) %>%
   drop_na()
 
@@ -334,7 +363,7 @@ kmeans_model <- kmeans(features, centers = k, nstart = 10)
 rating_rf_clusters <- rating_rf %>%
   mutate(
     cluster = as.factor(kmeans_model$cluster),
-    rating_class = if_else(cluster == 1, "High", "Low")  
+    rating_class = if_else(cluster == 1, "Low", "High")  
   )
 
 ggplot(rating_rf_clusters, aes(x = rating_class, y = combinedRating, fill = rating_class)) +
@@ -375,8 +404,8 @@ coords_map <- trainData %>%
 plot_data <- coords_map %>%
   mutate(
     is_anomaly = if_else(
-      (rating_class == "High" & Dim1 < 0.2) | 
-        (rating_class == "Low" & Dim1 > 0.6),
+      (rating_class == "High" & Dim1 > 0.0) | 
+        (rating_class == "Low" & Dim1 < -0.35),
       as.character(title), 
       NA_character_
     )
@@ -403,46 +432,47 @@ ggplot(plot_data, aes(x = Dim1, y = Dim2, color = rating_class)) +
        color = "Rating Class")
 
 #Linear models 
-model1 <- glm(profit ~ runtime + budget + popularity + star_power_score + 
+model1 <- glm(profit_2023 ~ runtime + budget_2023 + popularity + star_power_score + 
                 director_power_score + season + numVotes +
                 original_language + is_franchise, data = superhero_rf)
 summary(model1)
 
 profit_long <- superhero_rf %>%
-  select(profit, budget, star_power_score, numVotes) %>%
+  select(profit_2023, budget_2023, star_power_score, numVotes) %>%
   pivot_longer(
-    cols = c(budget, star_power_score, numVotes),
+    cols = c(budget_2023, star_power_score, numVotes),
     names_to = "Metric",
     values_to = "Value"
   ) %>%
   mutate(Metric = case_when(
     Metric == "star_power_score" ~ "Star Average Career Profit",
-    Metric == "budget" ~ "Budget ($)",
+    Metric == "budget_2023" ~ "Budget Adjusted for Inflation($)",
     Metric == "numVotes" ~ "Number of IMDb Votes (log10)"
   ))
-ggplot(profit_long, aes(x = Value, y = profit)) +
+ggplot(profit_long, aes(x = Value, y = profit_2023)) +
   geom_point(alpha = 0.7) +
   geom_smooth(method = "lm", se = FALSE) +
   facet_wrap(~Metric, scales = "free_x") +
   theme_bw() +
-  labs(x = NULL, y = "Profit ($)")
+  labs(x = NULL, y = "Profit Adjusted for Inflation ($)")
 
 rating_rf$original_language <- relevel(as.factor(rating_rf$original_language), ref = "en")
 
-model2 <- glm(combinedRating ~ runtime + star_power_score + director_power_score + popularity
+model2 <- glm(combinedRating ~ runtime  + popularity
               + season + is_franchise + original_language + numVotes, data = rating_rf)
 summary(model2)
 
 rating_long <- rating_rf %>%
-  select(combinedRating, popularity, numVotes) %>%
+  select(combinedRating, popularity, numVotes, runtime) %>%
   pivot_longer(
-    cols = c(popularity, numVotes),
+    cols = c(popularity, numVotes, runtime),
     names_to = "Metric",
     values_to = "Value"
   ) %>%
   mutate(Metric = case_when(
     Metric == "popularity" ~ "Popularity",
-    Metric == "numVotes" ~ "Number of IMDb Votes (Log10)"
+    Metric == "numVotes" ~ "Number of IMDb Votes (Log10)",
+    Metric == "runtime" ~ "Runtime (mins)"
   ))
 
 ggplot(rating_long, aes(x = Value, y = combinedRating)) +
