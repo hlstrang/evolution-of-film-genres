@@ -11,11 +11,20 @@ library(slider)
 library(factoextra)
 library(quantmod)
 setwd("Documents/programming/tmdb_proj_0526")
-rm(list = ls())
 
 df <- read_csv("TMDB  IMDB Movies Dataset.csv")
 
 ##Superheros
+superhero_df <- df %>%
+  filter(str_detect(keywords, "superhero|marvel|dc comics|comic book")) %>%
+  filter(!is.na(release_date)) %>%
+  mutate(year = year(as.Date(release_date)),
+         decade = as.factor((year %/% 10) * 10),
+         combinedRating = (averageRating + vote_average)/2) %>%
+  filter(runtime != 0 & runtime > 40) %>%
+  filter(year >= 1960 & year <= 2023) %>%
+  filter(popularity < 2000)
+write_csv(superhero_df, "superheroes.csv")
 
 #Filtering
 getSymbols("CPIAUCSL", src = "FRED")
@@ -42,19 +51,7 @@ total_films_per_year <- all_films %>%
   group_by(year) %>%
   summarise(total_films = n())
 
-superhero_df <- df %>%
-  filter(str_detect(keywords, "superhero|marvel|dc comics|comic book")) %>%
-  filter(!is.na(release_date)) %>%
-  mutate(year = year(as.Date(release_date)),
-         decade = as.factor((year %/% 10) * 10),
-         combinedRating = (averageRating + vote_average)/2) %>%
-  filter(runtime != 0 & runtime > 40) %>%
-  filter(year >= 1960 & year <= 2023) %>%
-  filter(popularity < 2000) %>%
-  mutate(rating_category = cut(combinedRating, 
-                               breaks = c(0, 4, 7, 10), 
-                               labels = c("Low", "Medium", "High"),
-                               include.lowest = TRUE)) %>%
+superhero_df <- superhero_df %>%
   left_join(cpi_data, by = "year")
 
 base_year <- 2023
